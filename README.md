@@ -18,6 +18,22 @@ conda run -n lerobot pip install -e .
 conda run -n lerobot python scripts/check_available.py
 ```
 
+## Example train command
+
+This command was validated against `HuggingFaceVLA/libero` in the local
+`lerobot` environment.
+
+```bash
+lerobot-train \
+  --policy.push_to_hub=false \
+  --dataset.repo_id=HuggingFaceVLA/libero \
+  --policy.type=lam \
+  --policy.camera_key=observation.images.image \
+  --policy.future_frames=1 \
+  --batch_size=8 \
+  --steps=200 \
+```
+
 ## Notes
 
 - `policy.type` is `lam`.
