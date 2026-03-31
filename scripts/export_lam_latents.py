@@ -39,7 +39,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot_policy_lam.modeling_lam import LAMPolicy
+from lerobot_policy_lam_lapa.modeling_lam import LAMPolicy
 
 LATENT_FORMAT_IDS = "ids"
 LATENT_FORMAT_CONTINUOUS = "continuous"
@@ -190,35 +190,7 @@ def _get_latent_export_spec(policy: LAMPolicy, latent_format: str) -> tuple[tupl
 
 
 def _extract_latents(policy: LAMPolicy, video: torch.Tensor, latent_format: str) -> torch.Tensor:
-    model = policy.lam
-    video = model._normalize_video_input(video)
-    first_frame = video[:, :, :1]
-    last_frame = video[:, :, 1:]
-    _, _, first_tokens_flat, last_tokens_flat = model._encode_frames(first_frame, last_frame)
-
-    batch_size = first_tokens_flat.shape[0]
-    first = model.vq.encode(first_tokens_flat.contiguous(), batch_size)
-    last = model.vq.encode(last_tokens_flat.contiguous(), batch_size)
-    delta = last - first
-
-    if latent_format == LATENT_FORMAT_CONTINUOUS:
-        return delta.reshape(batch_size, model.code_seq_len, model.vq.embedding_dim)
-
-    distances = (
-        torch.sum(delta**2, dim=1, keepdim=True)
-        - 2 * torch.matmul(delta, model.vq.codebooks.t())
-        + torch.sum(model.vq.codebooks.t() ** 2, dim=0, keepdim=True)
-    )
-    min_indices = torch.argmin(distances, dim=1)
-
-    if latent_format == LATENT_FORMAT_IDS:
-        return min_indices.reshape(batch_size, model.code_seq_len)
-
-    if latent_format == LATENT_FORMAT_CODEBOOK_VECTORS:
-        hard_quantized = model.vq.codebooks[min_indices]
-        return hard_quantized.reshape(batch_size, model.code_seq_len, model.vq.embedding_dim)
-
-    raise ValueError(f"Unsupported latent_format={latent_format!r}.")
+    return policy.extract_latents_from_video(video, latent_format=latent_format)
 
 
 def _run_export(

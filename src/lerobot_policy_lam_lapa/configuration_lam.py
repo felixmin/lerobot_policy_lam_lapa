@@ -6,7 +6,7 @@ from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 
 
-@PreTrainedConfig.register_subclass("lam")
+@PreTrainedConfig.register_subclass("lam_lapa")
 @dataclass
 class LAMConfig(PreTrainedConfig):
     """Plain LAPA-style latent action model policy.
@@ -17,6 +17,7 @@ class LAMConfig(PreTrainedConfig):
 
     n_obs_steps: int = 1
     future_frames: int = 10
+    future_seconds: float | None = None
     camera_key: str | None = None
 
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -30,8 +31,8 @@ class LAMConfig(PreTrainedConfig):
 
     dim: int = 1024
     quant_dim: int = 32
-    codebook_size: int = 2048
-    code_seq_len: int = 1
+    codebook_size: int = 8
+    code_seq_len: int = 4
     image_size: tuple[int, int] = (256, 256)
     patch_size: tuple[int, int] = (32, 32)
     spatial_depth: int = 8
@@ -78,6 +79,10 @@ class LAMConfig(PreTrainedConfig):
         super().__post_init__()
         if self.future_frames < 1:
             raise ValueError(f"future_frames must be >= 1, got {self.future_frames}.")
+        if self.future_seconds is not None and self.future_seconds <= 0:
+            raise ValueError(
+                f"future_seconds must be > 0 when set, got {self.future_seconds}."
+            )
         if self.metrics_num_unique_codes_every_n_steps < 1:
             raise ValueError("metrics_num_unique_codes_every_n_steps must be >= 1.")
 
@@ -113,6 +118,11 @@ class LAMConfig(PreTrainedConfig):
     @property
     def observation_delta_indices(self) -> list[int]:
         return [0, self.future_frames]
+
+    def get_observation_delta_indices_for_fps(self, fps: float | int) -> list[int]:
+        if self.future_seconds is None:
+            return [0, self.future_frames]
+        return [0, max(1, round(float(fps) * float(self.future_seconds)))]
 
     @property
     def action_delta_indices(self) -> None:

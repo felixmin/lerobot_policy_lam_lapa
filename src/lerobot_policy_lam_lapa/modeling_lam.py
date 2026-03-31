@@ -7,8 +7,15 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot_policy_lam.configuration_lam import LAMConfig
-from lerobot_policy_lam.core_model import PlainLAMModel
+from lerobot_policy_lam_lapa.configuration_lam import LAMConfig
+from lerobot_policy_lam_lapa.core_model import PlainLAMModel
+
+LATENT_FORMAT_IDS = "ids"
+LATENT_FORMAT_CONTINUOUS = "continuous"
+LATENT_FORMAT_CODEBOOK_VECTORS = "codebook_vectors"
+REPRESENTATION_CODEBOOK_IDS = "codebook_id_latents"
+REPRESENTATION_CODEBOOK_VECTORS = "codebook_vector_latents"
+REPRESENTATION_CONTINUOUS_VECTORS = "continuous_vector_latents"
 
 
 def _separate_weight_decayable_params(
@@ -72,6 +79,123 @@ class LAMPolicy(PreTrainedPolicy):
 
     def update(self) -> None:
         self._train_step += 1
+
+    def _resolve_representation(self, representation: str) -> tuple[str, tuple[int, ...], str, int | float]:
+        if representation == REPRESENTATION_CODEBOOK_IDS:
+            return LATENT_FORMAT_IDS, (self.config.code_seq_len,), "int64", -100
+        if representation == REPRESENTATION_CODEBOOK_VECTORS:
+            return (
+                LATENT_FORMAT_CODEBOOK_VECTORS,
+                (self.config.code_seq_len, self.config.quant_dim),
+                "float32",
+                0.0,
+            )
+        if representation == REPRESENTATION_CONTINUOUS_VECTORS:
+            return (
+                LATENT_FORMAT_CONTINUOUS,
+                (self.config.code_seq_len, self.config.quant_dim),
+                "float32",
+                0.0,
+        )
+        raise ValueError(f"Unsupported representation={representation!r}.")
+
+    def _representation_specs(self) -> dict[str, dict[str, Any]]:
+        return {
+            representation: {
+                "shape": shape,
+                "dtype": dtype,
+                "invalid_fill_value": invalid_fill_value,
+            }
+            for representation, (_, shape, dtype, invalid_fill_value) in {
+                REPRESENTATION_CODEBOOK_IDS: self._resolve_representation(REPRESENTATION_CODEBOOK_IDS),
+                REPRESENTATION_CODEBOOK_VECTORS: self._resolve_representation(REPRESENTATION_CODEBOOK_VECTORS),
+                REPRESENTATION_CONTINUOUS_VECTORS: self._resolve_representation(REPRESENTATION_CONTINUOUS_VECTORS),
+            }.items()
+        }
+
+    def prepare_latent_export(self, dataset_meta: Any) -> dict[str, Any]:
+        camera_key = self.config.camera_key or next(iter(self.config.image_features))
+        delta_timestamps = {
+            camera_key: [delta_idx / dataset_meta.fps for delta_idx in self.config.observation_delta_indices]
+        }
+        return {
+            "delta_timestamps": delta_timestamps,
+            "representations": self._representation_specs(),
+        }
+
+    @torch.inference_mode()
+    def export_latent_labels(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        video, valid_mask, _ = self._extract_frame_pair(batch)
+        if not bool(valid_mask.any().item()):
+            return {
+                "labels_by_name": {
+                    name: torch.empty((0, *spec["shape"]), device=video.device)
+                    for name, spec in self._representation_specs().items()
+                },
+                "valid_mask": valid_mask,
+            }
+
+        valid_video = video[valid_mask]
+        return {
+            "labels_by_name": self._extract_all_latents_from_video(valid_video),
+            "valid_mask": valid_mask,
+        }
+
+    def _extract_all_latents_from_video(self, video: Tensor) -> dict[str, Tensor]:
+        model = self.lam
+        video = model._normalize_video_input(video)
+        first_frame = video[:, :, :1]
+        last_frame = video[:, :, 1:]
+        _, _, first_tokens_flat, last_tokens_flat = model._encode_frames(first_frame, last_frame)
+
+        batch_size = first_tokens_flat.shape[0]
+        first = model.vq.encode(first_tokens_flat.contiguous(), batch_size)
+        last = model.vq.encode(last_tokens_flat.contiguous(), batch_size)
+        delta = last - first
+        continuous = delta.reshape(batch_size, model.code_seq_len, model.vq.embedding_dim)
+
+        distances = (
+            torch.sum(delta**2, dim=1, keepdim=True)
+            - 2 * torch.matmul(delta, model.vq.codebooks.t())
+            + torch.sum(model.vq.codebooks.t() ** 2, dim=0, keepdim=True)
+        )
+        min_indices = torch.argmin(distances, dim=1)
+        codebook_vectors = model.vq.codebooks[min_indices].reshape(
+            batch_size, model.code_seq_len, model.vq.embedding_dim
+        )
+
+        return {
+            REPRESENTATION_CODEBOOK_IDS: min_indices.reshape(batch_size, model.code_seq_len),
+            REPRESENTATION_CODEBOOK_VECTORS: codebook_vectors,
+            REPRESENTATION_CONTINUOUS_VECTORS: continuous,
+        }
+
+    def extract_latents_from_video(self, video: Tensor, *, latent_format: str = LATENT_FORMAT_IDS) -> Tensor:
+        latents_by_representation = self._extract_all_latents_from_video(video)
+        if latent_format == LATENT_FORMAT_IDS:
+            return latents_by_representation[REPRESENTATION_CODEBOOK_IDS]
+        if latent_format == LATENT_FORMAT_CONTINUOUS:
+            return latents_by_representation[REPRESENTATION_CONTINUOUS_VECTORS]
+        if latent_format == LATENT_FORMAT_CODEBOOK_VECTORS:
+            return latents_by_representation[REPRESENTATION_CODEBOOK_VECTORS]
+        raise ValueError(f"Unsupported latent_format={latent_format!r}.")
+
+    @torch.inference_mode()
+    def extract_latents(
+        self,
+        batch: dict[str, Tensor],
+        *,
+        latent_format: str = LATENT_FORMAT_IDS,
+    ) -> tuple[Tensor, Tensor, str]:
+        video, valid_pair, camera_key = self._extract_frame_pair(batch)
+        if not bool(valid_pair.any().item()):
+            empty_shape = (0, self.config.code_seq_len)
+            if latent_format in {LATENT_FORMAT_CONTINUOUS, LATENT_FORMAT_CODEBOOK_VECTORS}:
+                empty_shape = (0, self.config.code_seq_len, self.config.quant_dim)
+            empty = torch.empty(empty_shape, device=video.device)
+            return empty, valid_pair, camera_key
+        latents = self.extract_latents_from_video(video[valid_pair], latent_format=latent_format)
+        return latents, valid_pair, camera_key
 
     def _extract_frame_pair(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor, str]:
         camera_key = self.config.camera_key or next(iter(self.config.image_features))

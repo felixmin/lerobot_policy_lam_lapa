@@ -9,10 +9,10 @@ from lerobot.processor import (
 )
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
-from lerobot_policy_lam.configuration_lam import LAMConfig
+from lerobot_policy_lam_lapa.configuration_lam import LAMConfig
 
 
-def make_lam_pre_post_processors(
+def make_lam_lapa_pre_post_processors(
     config: LAMConfig,
     dataset_stats=None,  # noqa: ARG001
 ) -> tuple[
@@ -39,3 +39,4 @@ def make_lam_pre_post_processors(
             to_output=transition_to_policy_action,
         ),
     )
+

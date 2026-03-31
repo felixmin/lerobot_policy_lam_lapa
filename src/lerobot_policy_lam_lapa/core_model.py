@@ -8,8 +8,8 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from torch import nn
 
-from lerobot_policy_lam.core_attention import ContinuousPositionBias, Transformer
-from lerobot_policy_lam.core_nsvq import NSVQ
+from lerobot_policy_lam_lapa.core_attention import ContinuousPositionBias, Transformer
+from lerobot_policy_lam_lapa.core_nsvq import NSVQ
 
 
 def pair(value: int | tuple[int, int]) -> tuple[int, int]:
@@ -236,7 +236,7 @@ class PlainLAMModel(nn.Module):
         video = self._normalize_video_input(video)
         first_frame = video[:, :, :1]
         last_frame = video[:, :, 1:]
-        first_tokens, _, first_tokens_flat, last_tokens_flat = self._encode_frames(first_frame, last_frame)
+        _, _, first_tokens_flat, last_tokens_flat = self._encode_frames(first_frame, last_frame)
 
         if return_only_codebook_ids:
             return self.vq.get_indices(first_tokens_flat, last_tokens_flat)
@@ -246,8 +246,9 @@ class PlainLAMModel(nn.Module):
         action_tokens = self._prepare_action_tokens(quantized_tokens)
 
         attn_bias = self.spatial_rel_pos_bias(self.grid_h, self.grid_w, device=video.device)
-        video_shape = tuple(first_tokens.shape[:-1])
-        pixel_context = rearrange(first_tokens, "b t h w d -> (b t) (h w) d")
+        decoder_context = self.pixel_projection(first_frame).detach()
+        video_shape = tuple(decoder_context.shape[:-1])
+        pixel_context = rearrange(decoder_context, "b t h w d -> (b t) (h w) d")
         action_context = rearrange(action_tokens, "b t h w d -> (b t) (h w) d")
         decoded = self.pixel_decoder(pixel_context, video_shape=video_shape, attn_bias=attn_bias, context=action_context)
         decoded = rearrange(decoded, "(b t) (h w) d -> b t h w d", b=video.shape[0], h=self.grid_h, w=self.grid_w)

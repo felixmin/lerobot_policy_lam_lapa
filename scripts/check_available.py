@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 
 register_third_party_plugins()
 
-LAMConfig = PreTrainedConfig.get_choice_class("lam")
+LAMConfig = PreTrainedConfig.get_choice_class("lam_lapa")
 config = LAMConfig(
     device="cpu",
     future_frames=1,
